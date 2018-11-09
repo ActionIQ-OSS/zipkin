@@ -87,7 +87,7 @@ public class ZipkinMySQLStorageProperties implements Serializable { // for Spark
   }
 
   public DataSource toDataSource() {
-    StringBuilder url = new StringBuilder("jdbc:mysql://");
+    StringBuilder url = new StringBuilder("jdbc:mysql:aurora://");
     url.append(getHost()).append(":").append(getPort());
     url.append("/").append(getDb());
     url.append("?autoReconnect=true");
