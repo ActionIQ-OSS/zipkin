@@ -138,13 +138,13 @@ public final class Node<V> {
       this.traceId = traceId;
     }
 
-    String rootId = null;
+    Key rootKey = null;
     Node<V> rootNode = null;
     List<Entry<V>> entries = new ArrayList<>();
     // Nodes representing the trace tree
-    Map<String, Node<V>> idToNode = new LinkedHashMap<>();
+    Map<Key, Node<V>> keyToNode = new LinkedHashMap<>();
     // Collect the parent-child relationships between all spans.
-    Map<String, String> idToParent = new LinkedHashMap<>(idToNode.size());
+    Map<Key, Key> keyToParent = new LinkedHashMap<>(keyToNode.size());
 
     /**
      * This is a variant of a normal parent/child graph specialized for Zipkin. In a Zipkin tree, a
@@ -165,53 +165,61 @@ public final class Node<V> {
         }
       }
       boolean sharedV = Boolean.TRUE.equals(shared);
+
+      // ensure that keyToParent has a key for all entries as this is used to iterate later
+      Key idKey = new Key(id);
       if (sharedV) {
-        idToParent.put(id + "-s", id);
+        keyToParent.put(new Key(id, shared), idKey);
+      } else if (parentId != null) {
+        keyToParent.put(idKey, new Key(parentId));
       } else {
-        idToParent.put(id, parentId);
+        keyToParent.put(idKey, null);
       }
+
       entries.add(new Entry<>(parentId, id, sharedV, value));
       return true;
     }
 
     void processNode(Entry<V> entry) {
-      String id = entry.id, parentId = entry.parentId;
+      Key key = new Key(entry.id, entry.shared), parentKey = null;
       V value = entry.value;
 
-      if (entry.shared) {
-        parentId = id;
-        id += "-s";
-      } else if (parentId != null) {
-        String sharedParentId = parentId + "-s";
-        if (idToParent.containsKey(sharedParentId)) {
-          parentId = sharedParentId;
-          idToParent.put(id, sharedParentId);
+      if (key.shared) {
+        parentKey = new Key(entry.id);
+      } else if (entry.parentId != null) {
+        // Check to see if a shared parent exists, and prefer that. This means the current entry is
+        // a child of a shared node.
+        parentKey = new Key(entry.parentId, true);
+        if (keyToParent.containsKey(parentKey)) {
+          keyToParent.put(key, parentKey);
+        } else {
+          parentKey.shared = false;
         }
       }
 
-      if (parentId == null) {
-        if (rootId != null) {
+      if (parentKey == null) {
+        if (rootKey != null) {
           if (logger.isLoggable(FINE)) {
             logger.fine(format(
               "attributing span missing parent to root: traceId=%s, rootSpanId=%s, spanId=%s",
-              traceId, rootId, id));
+              traceId, rootKey.id, key.id));
           }
         } else {
-          rootId = id;
+          rootKey = key;
         }
       }
 
       Node<V> node = new Node<>(value);
       // special-case root, and attribute missing parents to it. In
       // other words, assume that the first root is the "real" root.
-      if (parentId == null && rootNode == null) {
+      if (parentKey == null && rootNode == null) {
         rootNode = node;
-        rootId = id;
-        idToParent.remove(id);
-      } else if (parentId == null && rootId.equals(id)) {
+        rootKey = key;
+        keyToParent.remove(key);
+      } else if (parentKey == null && rootKey.equals(key)) {
         rootNode.setValue(mergeFunction.merge(rootNode.value, node.value));
       } else {
-        Node<V> previous = idToNode.put(id, node);
+        Node<V> previous = keyToNode.put(key, node);
         if (previous != null) node.setValue(mergeFunction.merge(previous.value, node.value));
       }
     }
@@ -223,9 +231,9 @@ public final class Node<V> {
       }
 
       // Materialize the tree using parent - child relationships
-      for (Map.Entry<String, String> entry : idToParent.entrySet()) {
-        Node<V> node = idToNode.get(entry.getKey());
-        Node<V> parent = idToNode.get(entry.getValue());
+      for (Map.Entry<Key, Key> entry : keyToParent.entrySet()) {
+        Node<V> node = keyToNode.get(entry.getKey());
+        Node<V> parent = keyToNode.get(entry.getValue());
         if (parent == null) { // handle headless
           if (rootNode == null) {
             if (logger.isLoggable(FINE)) {
@@ -239,6 +247,38 @@ public final class Node<V> {
         }
       }
       return rootNode != null ? rootNode : new Node<>(null);
+    }
+  }
+
+  /** A node in the tree is not always unique on ID. Sharing is allowed once per ID (Ex: in RPC). */
+  static final class Key {
+    final String id;
+    boolean shared;
+
+    Key(String id) {
+      this(id, false);
+    }
+
+    Key(String id, boolean shared) {
+      this.id = id;
+      this.shared = shared;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (o == this) return true;
+      if (!(o instanceof Key)) return false;
+      Key that = (Key) o;
+      return id.equals(that.id) && shared == that.shared;
+    }
+
+    @Override public int hashCode() {
+      int h$ = 1;
+      h$ *= 1000003;
+      h$ ^= id.hashCode();
+      h$ *= 1000003;
+      h$ ^= Boolean.hashCode(shared);
+      return h$;
     }
   }
 
@@ -257,8 +297,7 @@ public final class Node<V> {
       this.value = value;
     }
 
-    @Override
-    public String toString() {
+    @Override public String toString() {
       return "Entry{parentId="
         + parentId
         + ", id="
@@ -271,8 +310,7 @@ public final class Node<V> {
     }
   }
 
-  @Override
-  public String toString() {
+  @Override public String toString() {
     return "Node{parent=" + parent + ", value=" + value + ", children=" + children + "}";
   }
 }
