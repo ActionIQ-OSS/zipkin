@@ -273,12 +273,12 @@ public final class Node<V> {
     }
 
     @Override public int hashCode() {
-      int h$ = 1;
-      h$ *= 1000003;
-      h$ ^= id.hashCode();
-      h$ *= 1000003;
-      h$ ^= Boolean.hashCode(shared);
-      return h$;
+      int result = 1;
+      result *= 1000003;
+      result ^= id.hashCode();
+      result *= 1000003;
+      result ^= shared ? 1231 : 1237;
+      return result;
     }
   }
 
