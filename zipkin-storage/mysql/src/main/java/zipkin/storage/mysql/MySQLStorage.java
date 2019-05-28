@@ -16,6 +16,7 @@ package zipkin.storage.mysql;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import javax.sql.DataSource;
 import org.jooq.ExecuteListenerProvider;
 import org.jooq.conf.Settings;
@@ -36,6 +37,7 @@ public final class MySQLStorage implements StorageComponent {
   public static Builder builder() {
     return new Builder();
   }
+  protected static Executor exec = Executors.newFixedThreadPool(5);
 
   public final static class Builder implements StorageComponent.Builder {
     boolean strictTraceId = true;
@@ -115,7 +117,7 @@ public final class MySQLStorage implements StorageComponent {
 
   @Override public AsyncSpanConsumer asyncSpanConsumer() {
     MySQLSpanConsumer spanConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
-    return blockingToAsync(spanConsumer, executor);
+    return blockingToAsync(spanConsumer, exec);
   }
 
   @Override public CheckResult check() {

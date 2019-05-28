@@ -20,11 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
-import org.jooq.DSLContext;
-import org.jooq.InsertSetMoreStep;
-import org.jooq.Query;
-import org.jooq.Record;
-import org.jooq.TableField;
+
+import org.jooq.*;
 import zipkin.Annotation;
 import zipkin.BinaryAnnotation;
 import zipkin.Span;
@@ -40,6 +37,10 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
   private final DataSource datasource;
   private final DSLContexts context;
   private final Schema schema;
+  private Integer annotationCount = 0;
+  private InsertValuesStep11<Record, Long, Long, String, byte[], Integer, Long, Long, String, Integer, byte[], Short>
+          annotationColumns;
+
 
   MySQLSpanConsumer(DataSource datasource, DSLContexts context, Schema schema) {
     this.datasource = datasource;
@@ -52,7 +53,24 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
     if (spans.isEmpty()) return;
     try (Connection conn = datasource.getConnection()) {
       DSLContext create = context.get(conn);
-
+      synchronized (MySQLSpanConsumer.class) {
+        if (annotationColumns == null) {
+          annotationColumns = create.insertInto(ZIPKIN_ANNOTATIONS)
+                  .columns(
+                          ZIPKIN_ANNOTATIONS.TRACE_ID,
+                          ZIPKIN_ANNOTATIONS.SPAN_ID,
+                          ZIPKIN_ANNOTATIONS.A_KEY,
+                          ZIPKIN_ANNOTATIONS.A_VALUE,
+                          ZIPKIN_ANNOTATIONS.A_TYPE,
+                          ZIPKIN_ANNOTATIONS.A_TIMESTAMP,
+                          ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
+                  );
+        }
+      }
       List<Query> inserts = new ArrayList<>();
 
       for (Span span : spans) {
@@ -88,47 +106,79 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
             insertSpan.onDuplicateKeyIgnore() :
             insertSpan.onDuplicateKeyUpdate().set(updateFields));
 
-        for (Annotation annotation : span.annotations) {
-          InsertSetMoreStep<Record> insert = create.insertInto(ZIPKIN_ANNOTATIONS)
-              .set(ZIPKIN_ANNOTATIONS.TRACE_ID, span.traceId)
-              .set(ZIPKIN_ANNOTATIONS.SPAN_ID, span.id)
-              .set(ZIPKIN_ANNOTATIONS.A_KEY, annotation.value)
-              .set(ZIPKIN_ANNOTATIONS.A_TYPE, -1)
-              .set(ZIPKIN_ANNOTATIONS.A_TIMESTAMP, annotation.timestamp);
-          if (span.traceIdHigh != 0 && schema.hasTraceIdHigh) {
-            insert.set(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH, span.traceIdHigh);
-          }
-          if (annotation.endpoint != null) {
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME, annotation.endpoint.serviceName);
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4, annotation.endpoint.ipv4);
-            if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
-              insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6, annotation.endpoint.ipv6);
+        synchronized (MySQLSpanConsumer.class) {
+          for (Annotation annotation : span.annotations) {
+            Long traceIdHigh = 0L;
+            String serviceName = null;
+            Integer ipv4 = null;
+            byte[] ipv6 = null;
+            Short port = null;
+            if (span.traceIdHigh != 0 && schema.hasTraceIdHigh) {
+              traceIdHigh = span.traceIdHigh;
             }
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_PORT, annotation.endpoint.port);
+            if (annotation.endpoint != null) {
+              serviceName = annotation.endpoint.serviceName;
+              ipv4 = annotation.endpoint.ipv4;
+              if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
+                ipv6 = annotation.endpoint.ipv6;
+              }
+              port = annotation.endpoint.port;
+            }
+            annotationColumns.values(
+                    span.traceId,
+                    span.id,
+                    annotation.value,
+                    null,
+                    -1,
+                    annotation.timestamp,
+                    traceIdHigh,
+                    serviceName,
+                    ipv4,
+                    ipv6,
+                    port
+            );
+            annotationCount ++;
           }
-          inserts.add(insert.onDuplicateKeyIgnore());
-        }
 
-        for (BinaryAnnotation annotation : span.binaryAnnotations) {
-          InsertSetMoreStep<Record> insert = create.insertInto(ZIPKIN_ANNOTATIONS)
-              .set(ZIPKIN_ANNOTATIONS.TRACE_ID, span.traceId)
-              .set(ZIPKIN_ANNOTATIONS.SPAN_ID, span.id)
-              .set(ZIPKIN_ANNOTATIONS.A_KEY, annotation.key)
-              .set(ZIPKIN_ANNOTATIONS.A_VALUE, annotation.value)
-              .set(ZIPKIN_ANNOTATIONS.A_TYPE, annotation.type.value)
-              .set(ZIPKIN_ANNOTATIONS.A_TIMESTAMP, timestamp);
-          if (span.traceIdHigh != 0 && schema.hasTraceIdHigh) {
-            insert.set(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH, span.traceIdHigh);
-          }
-          if (annotation.endpoint != null) {
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME, annotation.endpoint.serviceName);
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4, annotation.endpoint.ipv4);
-            if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
-              insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6, annotation.endpoint.ipv6);
+          for (BinaryAnnotation annotation : span.binaryAnnotations) {
+            Long traceIdHigh = 0L;
+            String serviceName = null;
+            Integer ipv4 = null;
+            byte[] ipv6 = null;
+            Short port = null;
+            if (span.traceIdHigh != 0 && schema.hasTraceIdHigh) {
+              traceIdHigh = span.traceIdHigh;
             }
-            insert.set(ZIPKIN_ANNOTATIONS.ENDPOINT_PORT, annotation.endpoint.port);
+            if (annotation.endpoint != null) {
+              serviceName = annotation.endpoint.serviceName;
+              ipv4 = annotation.endpoint.ipv4;
+              if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
+                ipv6 = annotation.endpoint.ipv6;
+              }
+              port = annotation.endpoint.port;
+            }
+            annotationColumns.values(
+                    span.traceId,
+                    span.id,
+                    annotation.key,
+                    annotation.value,
+                    annotation.type.value,
+                    timestamp,
+                    traceIdHigh,
+                    serviceName,
+                    ipv4,
+                    ipv6,
+                    port
+            );
+            annotationCount ++;
           }
-          inserts.add(insert.onDuplicateKeyIgnore());
+        }
+      }
+      synchronized (MySQLSpanConsumer.class) {
+        if (annotationCount >= 10) {
+          annotationColumns.onDuplicateKeyIgnore().execute();
+          annotationColumns = null;
+          annotationCount = 0;
         }
       }
       create.batch(inserts).execute();

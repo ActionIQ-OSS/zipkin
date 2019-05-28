@@ -19,6 +19,9 @@ import org.junit.runners.model.Statement;
 import org.mariadb.jdbc.MariaDbDataSource;
 import zipkin.internal.LazyCloseable;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import static org.junit.Assume.assumeTrue;
 import static zipkin.internal.Util.envOr;
 
@@ -28,6 +31,7 @@ public class LazyMySQLStorage extends LazyCloseable<MySQLStorage>
   final String version;
 
   ZipkinMySQLContainer container;
+  static ExecutorService executor = Executors.newFixedThreadPool(5);
 
   public LazyMySQLStorage(String version) {
     this.version = version;
@@ -62,6 +66,7 @@ public class LazyMySQLStorage extends LazyCloseable<MySQLStorage>
       dataSource.setDatabaseName(envOr("MYSQL_DB", "zipkin"));
       dataSource.setPassword(envOr("MYSQL_PASS", ""));
     }
+
 
     dataSource.setProperties("autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8");
 
