@@ -15,6 +15,8 @@ package zipkin.storage.mysql;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import javax.sql.DataSource;
@@ -37,7 +39,7 @@ public final class MySQLStorage implements StorageComponent {
   public static Builder builder() {
     return new Builder();
   }
-  protected static Executor exec = Executors.newFixedThreadPool(5);
+  private static Executor exec = Executors.newFixedThreadPool(2);
 
   public final static class Builder implements StorageComponent.Builder {
     boolean strictTraceId = true;
