@@ -15,8 +15,6 @@ package zipkin.storage.mysql;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.LinkedList;
-import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.Executor;
@@ -91,7 +89,8 @@ public final class MySQLStorage implements StorageComponent {
   private final DataSource datasource;
   private final Executor executor;
   private final DSLContexts context;
-  private final Timer timer;
+  private final Timer spansTimer;
+  private final Timer annotationsTimer;
   final Lazy<Schema> schema;
   final boolean strictTraceId;
 
@@ -105,15 +104,24 @@ public final class MySQLStorage implements StorageComponent {
       }
     };
     this.strictTraceId = builder.strictTraceId;
-    this.timer = new Timer();
-    MySQLSpanConsumer timerConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
-    TimerTask persistTask = new TimerTask() {
+    this.spansTimer = new Timer();
+    this.annotationsTimer = new Timer();
+    MySQLSpanConsumer spanConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask spansPersist = new TimerTask() {
       @Override
       public void run() {
-        timerConsumer.maybePersist();
+        spanConsumer.maybePersistSpans();
       }
     };
-    this.timer.scheduleAtFixedRate(persistTask, 0, 5 * 1000);
+    this.spansTimer.scheduleAtFixedRate(spansPersist, 0, 10 * 1000);
+    MySQLSpanConsumer annotationConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask annotationsPersist = new TimerTask() {
+      @Override
+      public void run() {
+        annotationConsumer.maybePersistAnnotations();
+      }
+    };
+    this.annotationsTimer.scheduleAtFixedRate(annotationsPersist, 0, 10 * 1000);
   }
 
   /** Returns the session in use by this storage component. */
