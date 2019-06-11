@@ -14,12 +14,15 @@
 package zipkin.storage.mysql;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.sql.DataSource;
 
 import org.jooq.*;
+import org.jooq.exception.DataAccessException;
 import zipkin.Annotation;
 import zipkin.BinaryAnnotation;
 import zipkin.Span;
@@ -35,9 +38,9 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
   private final DataSource datasource;
   private final DSLContexts context;
   private final Schema schema;
-  private static final int bufferSize = 2000;
-  private final static List<SpanRow> spanRows = new LinkedList<>();
-  private final static List<AnnotationRow> annotationRows = new LinkedList<>();
+  private static final int bufferSize = 1000;
+  private final static Queue<SpanRow> spanRows = new ConcurrentLinkedQueue<>();
+  private final static Queue<AnnotationRow> annotationRows = new ConcurrentLinkedQueue<>();
   private static final Logger LOG = Logger.getLogger(MySQLSpanConsumer.class.getName());
 
 
@@ -47,6 +50,26 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
     this.schema = schema;
   }
 
+  private void doAnnotationInsert(
+          InsertValuesStep11<Record, Long, Long, String, byte[], Integer, Long, Long, String, Integer, byte[], Short> insert
+  ) throws DataAccessException {
+    boolean retry;
+    int tries = 0;
+    do {
+      retry = false;
+      try {
+        insert.onDuplicateKeyIgnore().execute();
+      } catch (DataAccessException ex) {
+        if (ex.getMessage().contains("Deadlock")) {
+          System.out.println("Deadlock detected for attempt " + (++tries));
+          retry = true;
+        } else {
+          throw ex;
+        }
+      }
+    } while (retry);
+
+  }
 
   public void maybePersistAnnotations(){
     try (Connection conn = datasource.getConnection()) {
@@ -66,49 +89,47 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
                       ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
                       ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
               );
-      synchronized (annotationRows) {
-        int rowCount = 0;
-        for (AnnotationRow row : annotationRows) {
-          insert.values(
-                  row.traceId,
-                  row.spanId,
-                  row.key,
-                  row.value,
-                  row.type,
-                  row.timestamp,
-                  row.traceIdHigh,
-                  row.serviceName,
-                  row.ipv4,
-                  row.ipv6,
-                  row.port
-          );
-          rowCount++;
-          if (rowCount >= bufferSize) {
-            insert.onDuplicateKeyIgnore().execute();
-            insert = create.insertInto(ZIPKIN_ANNOTATIONS)
-                    .columns(
-                            ZIPKIN_ANNOTATIONS.TRACE_ID,
-                            ZIPKIN_ANNOTATIONS.SPAN_ID,
-                            ZIPKIN_ANNOTATIONS.A_KEY,
-                            ZIPKIN_ANNOTATIONS.A_VALUE,
-                            ZIPKIN_ANNOTATIONS.A_TYPE,
-                            ZIPKIN_ANNOTATIONS.A_TIMESTAMP,
-                            ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH,
-                            ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME,
-                            ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4,
-                            ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
-                            ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
-                    );
-            rowCount = 0;
-          }
+      int rowCount = 0;
+      while (!annotationRows.isEmpty()) {
+        AnnotationRow row = annotationRows.remove();
+
+        insert.values(
+                row.traceId,
+                row.spanId,
+                row.key,
+                row.value,
+                row.type,
+                row.timestamp,
+                row.traceIdHigh,
+                row.serviceName,
+                row.ipv4,
+                row.ipv6,
+                row.port
+        );
+        rowCount++;
+        if (rowCount >= bufferSize) {
+          doAnnotationInsert(insert);
+          insert = create.insertInto(ZIPKIN_ANNOTATIONS)
+                  .columns(
+                          ZIPKIN_ANNOTATIONS.TRACE_ID,
+                          ZIPKIN_ANNOTATIONS.SPAN_ID,
+                          ZIPKIN_ANNOTATIONS.A_KEY,
+                          ZIPKIN_ANNOTATIONS.A_VALUE,
+                          ZIPKIN_ANNOTATIONS.A_TYPE,
+                          ZIPKIN_ANNOTATIONS.A_TIMESTAMP,
+                          ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
+                          ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
+                  );
+          rowCount = 0;
         }
-        if (rowCount > 0) {
-          insert.onDuplicateKeyIgnore().execute();
-        }
-        annotationRows.clear();
+      }
+      if (rowCount > 0) {
+        doAnnotationInsert(insert);
       }
     } catch (Exception e) {
-      LOG.log(Level.SEVERE, "Some annotations SQL exception", e);
       System.out.println("Some error in sql " + e.getMessage());
     }
   }
@@ -128,53 +149,50 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
                               ZIPKIN_SPANS.DURATION,
                               ZIPKIN_SPANS.TRACE_ID_HIGH
                       );
-      synchronized (spanRows) {
-        int rowCount = 0;
-        for (SpanRow row : spanRows) {
-          insert.values(
-                  row.traceId,
-                  row.id,
-                  row.parentId,
-                  row.name,
-                  row.debug,
-                  row.timestamp,
-                  row.duration,
-                  row.traceIdHigh
-          );
-          rowCount++;
-          if (rowCount >= bufferSize) {
-            insert.onDuplicateKeyUpdate()
-                    .set(ZIPKIN_SPANS.NAME, UpsertDSL.values(ZIPKIN_SPANS.NAME))
-                    .set(ZIPKIN_SPANS.START_TS, UpsertDSL.values(ZIPKIN_SPANS.START_TS))
-                    .set(ZIPKIN_SPANS.DURATION, UpsertDSL.values(ZIPKIN_SPANS.DURATION))
-                    .execute();
-            insert = create.insertInto(ZIPKIN_SPANS)
-                    .columns(
-                            ZIPKIN_SPANS.TRACE_ID,
-                            ZIPKIN_SPANS.ID,
-                            ZIPKIN_SPANS.PARENT_ID,
-                            ZIPKIN_SPANS.NAME,
-                            ZIPKIN_SPANS.DEBUG,
-                            ZIPKIN_SPANS.START_TS,
-                            ZIPKIN_SPANS.DURATION,
-                            ZIPKIN_SPANS.TRACE_ID_HIGH
-                    );
-            rowCount = 0;
-          }
-        }
-        if (rowCount > 0) {
+      int rowCount = 0;
+      while (!spanRows.isEmpty()) {
+        SpanRow row = spanRows.remove();
+        insert.values(
+                row.traceId,
+                row.id,
+                row.parentId,
+                row.name,
+                row.debug,
+                row.timestamp,
+                row.duration,
+                row.traceIdHigh
+        );
+        rowCount++;
+        if (rowCount >= bufferSize) {
           insert.onDuplicateKeyUpdate()
                   .set(ZIPKIN_SPANS.NAME, UpsertDSL.values(ZIPKIN_SPANS.NAME))
                   .set(ZIPKIN_SPANS.START_TS, UpsertDSL.values(ZIPKIN_SPANS.START_TS))
                   .set(ZIPKIN_SPANS.DURATION, UpsertDSL.values(ZIPKIN_SPANS.DURATION))
                   .execute();
+          insert = create.insertInto(ZIPKIN_SPANS)
+                  .columns(
+                          ZIPKIN_SPANS.TRACE_ID,
+                          ZIPKIN_SPANS.ID,
+                          ZIPKIN_SPANS.PARENT_ID,
+                          ZIPKIN_SPANS.NAME,
+                          ZIPKIN_SPANS.DEBUG,
+                          ZIPKIN_SPANS.START_TS,
+                          ZIPKIN_SPANS.DURATION,
+                          ZIPKIN_SPANS.TRACE_ID_HIGH
+                  );
+          rowCount = 0;
         }
-        spanRows.clear();
+      }
+      if (rowCount > 0) {
+        insert.onDuplicateKeyUpdate()
+                .set(ZIPKIN_SPANS.NAME, UpsertDSL.values(ZIPKIN_SPANS.NAME))
+                .set(ZIPKIN_SPANS.START_TS, UpsertDSL.values(ZIPKIN_SPANS.START_TS))
+                .set(ZIPKIN_SPANS.DURATION, UpsertDSL.values(ZIPKIN_SPANS.DURATION))
+                .execute();
       }
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Some SQL exception int spans", e);
       System.out.println("Some error in sql " + e.getMessage());
-
     }
   }
 
@@ -190,80 +208,76 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
           traceIdHigh = span.traceIdHigh;
         }
 
-        synchronized (spanRows) {
-          spanRows.add(
-                  new SpanRow(
+        spanRows.add(
+                new SpanRow(
+                        span.traceId,
+                        span.id,
+                        span.parentId,
+                        span.name,
+                        span.debug,
+                        timestamp,
+                        span.duration,
+                        traceIdHigh
+                )
+        );
+        for (Annotation annotation : span.annotations) {
+          String serviceName = null;
+          Integer ipv4 = null;
+          byte[] ipv6 = null;
+          Short port = null;
+          if (annotation.endpoint != null) {
+            serviceName = annotation.endpoint.serviceName;
+            ipv4 = annotation.endpoint.ipv4;
+            if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
+              ipv6 = annotation.endpoint.ipv6;
+            }
+            port = annotation.endpoint.port;
+          }
+          annotationRows.add(
+                  new AnnotationRow(
                           span.traceId,
                           span.id,
-                          span.parentId,
-                          span.name,
-                          span.debug,
-                          timestamp,
-                          span.duration,
-                          traceIdHigh
+                          annotation.value,
+                          null,
+                          -1,
+                          annotation.timestamp,
+                          traceIdHigh,
+                          serviceName,
+                          ipv4,
+                          ipv6,
+                          port
                   )
           );
         }
-        synchronized (annotationRows) {
-          for (Annotation annotation : span.annotations) {
-            String serviceName = null;
-            Integer ipv4 = null;
-            byte[] ipv6 = null;
-            Short port = null;
-            if (annotation.endpoint != null) {
-              serviceName = annotation.endpoint.serviceName;
-              ipv4 = annotation.endpoint.ipv4;
-              if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
-                ipv6 = annotation.endpoint.ipv6;
-              }
-              port = annotation.endpoint.port;
-            }
-            annotationRows.add(
-                    new AnnotationRow(
-                            span.traceId,
-                            span.id,
-                            annotation.value,
-                            null,
-                            -1,
-                            annotation.timestamp,
-                            traceIdHigh,
-                            serviceName,
-                            ipv4,
-                            ipv6,
-                            port
-                    )
-            );
-          }
 
-          for (BinaryAnnotation annotation : span.binaryAnnotations) {
-            String serviceName = null;
-            Integer ipv4 = null;
-            byte[] ipv6 = null;
-            Short port = null;
-            if (annotation.endpoint != null) {
-              serviceName = annotation.endpoint.serviceName;
-              ipv4 = annotation.endpoint.ipv4;
-              if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
-                ipv6 = annotation.endpoint.ipv6;
-              }
-              port = annotation.endpoint.port;
+        for (BinaryAnnotation annotation : span.binaryAnnotations) {
+          String serviceName = null;
+          Integer ipv4 = null;
+          byte[] ipv6 = null;
+          Short port = null;
+          if (annotation.endpoint != null) {
+            serviceName = annotation.endpoint.serviceName;
+            ipv4 = annotation.endpoint.ipv4;
+            if (annotation.endpoint.ipv6 != null && schema.hasIpv6) {
+              ipv6 = annotation.endpoint.ipv6;
             }
-            annotationRows.add(
-                    new AnnotationRow(
-                            span.traceId,
-                            span.id,
-                            annotation.key,
-                            annotation.value,
-                            annotation.type.value,
-                            timestamp,
-                            traceIdHigh,
-                            serviceName,
-                            ipv4,
-                            ipv6,
-                            port
-                    )
-            );
+            port = annotation.endpoint.port;
           }
+          annotationRows.add(
+                  new AnnotationRow(
+                          span.traceId,
+                          span.id,
+                          annotation.key,
+                          annotation.value,
+                          annotation.type.value,
+                          timestamp,
+                          traceIdHigh,
+                          serviceName,
+                          ipv4,
+                          ipv6,
+                          port
+                  )
+          );
         }
       }
   }

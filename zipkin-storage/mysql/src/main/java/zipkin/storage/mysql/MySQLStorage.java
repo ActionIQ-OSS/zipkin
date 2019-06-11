@@ -91,6 +91,7 @@ public final class MySQLStorage implements StorageComponent {
   private final DSLContexts context;
   private final Timer spansTimer;
   private final Timer annotationsTimer;
+  private final Timer annotationsTimerToo;
   final Lazy<Schema> schema;
   final boolean strictTraceId;
 
@@ -106,6 +107,7 @@ public final class MySQLStorage implements StorageComponent {
     this.strictTraceId = builder.strictTraceId;
     this.spansTimer = new Timer();
     this.annotationsTimer = new Timer();
+    this.annotationsTimerToo = new Timer();
     MySQLSpanConsumer spanConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
     TimerTask spansPersist = new TimerTask() {
       @Override
@@ -114,6 +116,7 @@ public final class MySQLStorage implements StorageComponent {
       }
     };
     this.spansTimer.scheduleAtFixedRate(spansPersist, 0, 10 * 1000);
+
     MySQLSpanConsumer annotationConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
     TimerTask annotationsPersist = new TimerTask() {
       @Override
@@ -122,6 +125,15 @@ public final class MySQLStorage implements StorageComponent {
       }
     };
     this.annotationsTimer.scheduleAtFixedRate(annotationsPersist, 0, 10 * 1000);
+
+    MySQLSpanConsumer annotationConsumerToo = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask annotationsPersistToo = new TimerTask() {
+      @Override
+      public void run() {
+        annotationConsumerToo.maybePersistAnnotations();
+      }
+    };
+    this.annotationsTimerToo.scheduleAtFixedRate(annotationsPersistToo, 0, 10 * 1000);
   }
 
   /** Returns the session in use by this storage component. */
