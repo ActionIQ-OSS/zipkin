@@ -86,11 +86,20 @@ final class Schema {
   Condition spanTraceIdCondition(SelectOffsetStep<? extends Record> traceIdQuery) {
     if (hasTraceIdHigh) {
       Result<? extends Record> result = traceIdQuery.fetch();
-      List<Row2<Long, Long>> traceIds = new ArrayList<>(result.size());
+      //List<Row2<Long, Long>> traceIds = new ArrayList<>(result.size());
+      Condition condition = null;
       for (Record r : result) {
-        traceIds.add(row(r.get(ZIPKIN_SPANS.TRACE_ID_HIGH), r.get(ZIPKIN_SPANS.TRACE_ID)));
+        Condition newCondition = ZIPKIN_SPANS.TRACE_ID_HIGH.eq(r.get(ZIPKIN_SPANS.TRACE_ID_HIGH))
+                .and(ZIPKIN_SPANS.TRACE_ID.eq(r.get(ZIPKIN_SPANS.TRACE_ID)));
+        if (condition == null){
+          condition = newCondition;
+        } else {
+          condition = condition.or(newCondition);
+        }
+        //traceIds.add(row(r.get(ZIPKIN_SPANS.TRACE_ID_HIGH), r.get(ZIPKIN_SPANS.TRACE_ID)));
       }
-      return row(ZIPKIN_SPANS.TRACE_ID_HIGH, ZIPKIN_SPANS.TRACE_ID).in(traceIds);
+      return condition;
+      //return row(ZIPKIN_SPANS.TRACE_ID_HIGH, ZIPKIN_SPANS.TRACE_ID).in(traceIds);
     } else {
       List<Long> traceIds = traceIdQuery.fetch(ZIPKIN_SPANS.TRACE_ID);
       return ZIPKIN_SPANS.TRACE_ID.in(traceIds);

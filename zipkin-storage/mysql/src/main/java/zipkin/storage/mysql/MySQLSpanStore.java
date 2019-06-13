@@ -115,7 +115,8 @@ final class MySQLSpanStore implements SpanStore {
     distinctFields.add(ZIPKIN_SPANS.START_TS.max());
     SelectConditionStep<Record> dsl = context.selectDistinct(distinctFields)
         .from(table)
-        .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs));
+        .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs))
+            .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
 
     if (request.serviceName != null) {
       dsl.and(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(request.serviceName));
@@ -248,6 +249,11 @@ final class MySQLSpanStore implements SpanStore {
     return result.isEmpty() ? null : result.get(0);
   }
 
+  private Long oneHourAgoMicroSeconds() {
+    Long oneHourAgoMillis = System.currentTimeMillis() - 60 * 1000;
+    return oneHourAgoMillis * 1000;
+  }
+
   @Override
   public List<String> getServiceNames() {
     try (Connection conn = datasource.getConnection()) {
@@ -256,6 +262,7 @@ final class MySQLSpanStore implements SpanStore {
           .from(ZIPKIN_ANNOTATIONS)
           .where(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.isNotNull()
               .and(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.ne("")))
+              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.gt(oneHourAgoMicroSeconds()))
           .fetch(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME);
     } catch (SQLException e) {
       throw new RuntimeException("Error querying for " + e + ": " + e.getMessage());
@@ -274,6 +281,8 @@ final class MySQLSpanStore implements SpanStore {
           .on(ZIPKIN_SPANS.TRACE_ID.eq(ZIPKIN_ANNOTATIONS.TRACE_ID))
           .and(ZIPKIN_SPANS.ID.eq(ZIPKIN_ANNOTATIONS.SPAN_ID))
           .where(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(serviceName))
+              .and(ZIPKIN_SPANS.START_TS.gt(oneHourAgoMicroSeconds()))
+              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.gt(oneHourAgoMicroSeconds()))
           .orderBy(ZIPKIN_SPANS.NAME)
           .fetch(ZIPKIN_SPANS.NAME);
     } catch (SQLException e) {
@@ -321,6 +330,11 @@ final class MySQLSpanStore implements SpanStore {
         .where(lookback == null ?
             ZIPKIN_SPANS.START_TS.lessOrEqual(endTs) :
             ZIPKIN_SPANS.START_TS.between(endTs - lookback * 1000, endTs))
+            .and(lookback == null ?
+                    ZIPKIN_ANNOTATIONS.A_TIMESTAMP.lessOrEqual(endTs) :
+                    ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - lookback * 1000, endTs)
+            )
+
         // Grouping so that later code knows when a span or trace is finished.
         .groupBy(schema.dependencyLinkGroupByFields).fetchLazy();
 
