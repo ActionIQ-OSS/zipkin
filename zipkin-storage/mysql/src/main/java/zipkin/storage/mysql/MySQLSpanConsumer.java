@@ -91,46 +91,48 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
               );
       int rowCount = 0;
       while (!annotationRows.isEmpty()) {
-        AnnotationRow row = annotationRows.remove();
-
-        insert.values(
-                row.traceId,
-                row.spanId,
-                row.key,
-                row.value,
-                row.type,
-                row.timestamp,
-                row.traceIdHigh,
-                row.serviceName,
-                row.ipv4,
-                row.ipv6,
-                row.port
-        );
-        rowCount++;
-        if (rowCount >= bufferSize) {
-          doAnnotationInsert(insert);
-          insert = create.insertInto(ZIPKIN_ANNOTATIONS)
-                  .columns(
-                          ZIPKIN_ANNOTATIONS.TRACE_ID,
-                          ZIPKIN_ANNOTATIONS.SPAN_ID,
-                          ZIPKIN_ANNOTATIONS.A_KEY,
-                          ZIPKIN_ANNOTATIONS.A_VALUE,
-                          ZIPKIN_ANNOTATIONS.A_TYPE,
-                          ZIPKIN_ANNOTATIONS.A_TIMESTAMP,
-                          ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH,
-                          ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME,
-                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4,
-                          ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
-                          ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
-                  );
-          rowCount = 0;
+        AnnotationRow row = annotationRows.poll();
+        if (row != null) {
+          insert.values(
+                  row.traceId,
+                  row.spanId,
+                  row.key,
+                  row.value,
+                  row.type,
+                  row.timestamp,
+                  row.traceIdHigh,
+                  row.serviceName,
+                  row.ipv4,
+                  row.ipv6,
+                  row.port
+          );
+          rowCount++;
+          if (rowCount >= bufferSize) {
+            doAnnotationInsert(insert);
+            insert = create.insertInto(ZIPKIN_ANNOTATIONS)
+                    .columns(
+                            ZIPKIN_ANNOTATIONS.TRACE_ID,
+                            ZIPKIN_ANNOTATIONS.SPAN_ID,
+                            ZIPKIN_ANNOTATIONS.A_KEY,
+                            ZIPKIN_ANNOTATIONS.A_VALUE,
+                            ZIPKIN_ANNOTATIONS.A_TYPE,
+                            ZIPKIN_ANNOTATIONS.A_TIMESTAMP,
+                            ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH,
+                            ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME,
+                            ZIPKIN_ANNOTATIONS.ENDPOINT_IPV4,
+                            ZIPKIN_ANNOTATIONS.ENDPOINT_IPV6,
+                            ZIPKIN_ANNOTATIONS.ENDPOINT_PORT
+                    );
+            rowCount = 0;
+          }
         }
       }
       if (rowCount > 0) {
         doAnnotationInsert(insert);
       }
     } catch (Exception e) {
-      System.out.println("Some error in sql " + e.getMessage());
+      System.out.println("Some error in annotations sql " + e + e.getMessage());
+      e.printStackTrace();
     }
   }
 
@@ -151,36 +153,38 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
                       );
       int rowCount = 0;
       while (!spanRows.isEmpty()) {
-        SpanRow row = spanRows.remove();
-        insert.values(
-                row.traceId,
-                row.id,
-                row.parentId,
-                row.name,
-                row.debug,
-                row.timestamp,
-                row.duration,
-                row.traceIdHigh
-        );
-        rowCount++;
-        if (rowCount >= bufferSize) {
-          insert.onDuplicateKeyUpdate()
-                  .set(ZIPKIN_SPANS.NAME, UpsertDSL.values(ZIPKIN_SPANS.NAME))
-                  .set(ZIPKIN_SPANS.START_TS, UpsertDSL.values(ZIPKIN_SPANS.START_TS))
-                  .set(ZIPKIN_SPANS.DURATION, UpsertDSL.values(ZIPKIN_SPANS.DURATION))
-                  .execute();
-          insert = create.insertInto(ZIPKIN_SPANS)
-                  .columns(
-                          ZIPKIN_SPANS.TRACE_ID,
-                          ZIPKIN_SPANS.ID,
-                          ZIPKIN_SPANS.PARENT_ID,
-                          ZIPKIN_SPANS.NAME,
-                          ZIPKIN_SPANS.DEBUG,
-                          ZIPKIN_SPANS.START_TS,
-                          ZIPKIN_SPANS.DURATION,
-                          ZIPKIN_SPANS.TRACE_ID_HIGH
-                  );
-          rowCount = 0;
+        SpanRow row = spanRows.poll();
+        if (row != null) {
+          insert.values(
+                  row.traceId,
+                  row.id,
+                  row.parentId,
+                  row.name,
+                  row.debug,
+                  row.timestamp,
+                  row.duration,
+                  row.traceIdHigh
+          );
+          rowCount++;
+          if (rowCount >= bufferSize) {
+            insert.onDuplicateKeyUpdate()
+                    .set(ZIPKIN_SPANS.NAME, UpsertDSL.values(ZIPKIN_SPANS.NAME))
+                    .set(ZIPKIN_SPANS.START_TS, UpsertDSL.values(ZIPKIN_SPANS.START_TS))
+                    .set(ZIPKIN_SPANS.DURATION, UpsertDSL.values(ZIPKIN_SPANS.DURATION))
+                    .execute();
+            insert = create.insertInto(ZIPKIN_SPANS)
+                    .columns(
+                            ZIPKIN_SPANS.TRACE_ID,
+                            ZIPKIN_SPANS.ID,
+                            ZIPKIN_SPANS.PARENT_ID,
+                            ZIPKIN_SPANS.NAME,
+                            ZIPKIN_SPANS.DEBUG,
+                            ZIPKIN_SPANS.START_TS,
+                            ZIPKIN_SPANS.DURATION,
+                            ZIPKIN_SPANS.TRACE_ID_HIGH
+                    );
+            rowCount = 0;
+          }
         }
       }
       if (rowCount > 0) {
@@ -192,7 +196,8 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
       }
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Some SQL exception int spans", e);
-      System.out.println("Some error in sql " + e.getMessage());
+      System.out.println("Some error in spans sql " + e + e.getMessage());
+      e.printStackTrace();
     }
   }
 
