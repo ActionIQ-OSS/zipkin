@@ -16,6 +16,7 @@ package zipkin.storage.mysql;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -61,7 +62,10 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
         insert.onDuplicateKeyIgnore().execute();
       } catch (DataAccessException ex) {
         if (ex.getMessage().contains("Deadlock")) {
-          System.out.println("Deadlock detected for attempt " + (++tries));
+            tries ++;
+            if (tries > 1){
+              System.out.println("Deadlock detected for attempt " + tries);
+            }
           retry = true;
         } else {
           throw ex;
@@ -237,6 +241,11 @@ final class MySQLSpanConsumer implements StorageAdapters.SpanConsumer {
               ipv6 = annotation.endpoint.ipv6;
             }
             port = annotation.endpoint.port;
+          }
+          if (serviceName != null) {
+            String lowerServiceName = serviceName.toLowerCase();
+            SpanName.Store.spans.putIfAbsent(lowerServiceName, Collections.newSetFromMap(new ConcurrentHashMap<>(16, 0.9f, 2)));
+            SpanName.Store.spans.get(lowerServiceName).add(span.name);
           }
           annotationRows.add(
                   new AnnotationRow(

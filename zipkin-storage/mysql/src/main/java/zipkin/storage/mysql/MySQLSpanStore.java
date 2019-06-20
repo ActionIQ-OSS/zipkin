@@ -15,13 +15,7 @@ package zipkin.storage.mysql;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 import org.jooq.Condition;
@@ -273,21 +267,7 @@ final class MySQLSpanStore implements SpanStore {
   public List<String> getSpanNames(String serviceName) {
     if (serviceName == null) return emptyList();
     serviceName = serviceName.toLowerCase(); // service names are always lowercase!
-    try (Connection conn = datasource.getConnection()) {
-      return context.get(conn)
-          .selectDistinct(ZIPKIN_SPANS.NAME)
-          .from(ZIPKIN_SPANS)
-          .join(ZIPKIN_ANNOTATIONS)
-          .on(ZIPKIN_SPANS.TRACE_ID.eq(ZIPKIN_ANNOTATIONS.TRACE_ID))
-          .and(ZIPKIN_SPANS.ID.eq(ZIPKIN_ANNOTATIONS.SPAN_ID))
-          .where(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(serviceName))
-              .and(ZIPKIN_SPANS.START_TS.gt(oneHourAgoMicroSeconds()))
-              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.gt(oneHourAgoMicroSeconds()))
-          .orderBy(ZIPKIN_SPANS.NAME)
-          .fetch(ZIPKIN_SPANS.NAME);
-    } catch (SQLException e) {
-      throw new RuntimeException("Error querying for " + serviceName + ": " + e.getMessage());
-    }
+    return new LinkedList<>(SpanName.Store.spans.getOrDefault(serviceName, Collections.emptySet()));
   }
 
   @Override
