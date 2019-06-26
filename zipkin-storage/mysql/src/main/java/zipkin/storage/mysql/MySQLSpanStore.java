@@ -18,16 +18,9 @@ import java.sql.SQLException;
 import java.util.*;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
-import org.jooq.Condition;
-import org.jooq.Cursor;
-import org.jooq.DSLContext;
-import org.jooq.Record;
-import org.jooq.Row3;
-import org.jooq.SelectConditionStep;
-import org.jooq.SelectField;
-import org.jooq.SelectOffsetStep;
-import org.jooq.TableField;
-import org.jooq.TableOnConditionStep;
+
+import org.jooq.*;
+import org.jooq.impl.DSL;
 import zipkin.Annotation;
 import zipkin.BinaryAnnotation;
 import zipkin.BinaryAnnotation.Type;
@@ -85,8 +78,14 @@ final class MySQLSpanStore implements SpanStore {
     long endTs = (request.endTs > 0 && request.endTs != Long.MAX_VALUE) ? request.endTs * 1000
         : System.currentTimeMillis() * 1000;
 
-    TableOnConditionStep<?> table = ZIPKIN_SPANS.join(ZIPKIN_ANNOTATIONS)
+    Table<Record> zipkinAnnotationsWithIndex = DSL.table("{0} use index (trace_date)", ZIPKIN_ANNOTATIONS);
+    TableOnConditionStep<?> table = ZIPKIN_SPANS.join(zipkinAnnotationsWithIndex)
         .on(schema.joinCondition(ZIPKIN_ANNOTATIONS));
+
+    if (request.spanName != null || request.minDuration != null || request.maxDuration != null) {
+      table = ZIPKIN_SPANS.join(zipkinAnnotationsWithIndex)
+              .on(schema.joinCondition(ZIPKIN_ANNOTATIONS));
+    }
 
     int i = 0;
     for (String key : request.annotations) {
@@ -104,14 +103,26 @@ final class MySQLSpanStore implements SpanStore {
           .and(aTable.A_KEY.eq(kv.getKey()))
           .and(aTable.A_VALUE.eq(kv.getValue().getBytes(UTF_8))), aTable, request.serviceName);
     }
+    SelectConditionStep<Record> dsl;
 
-    List<SelectField<?>> distinctFields = new ArrayList<>(schema.spanIdFields);
-    distinctFields.add(ZIPKIN_SPANS.START_TS.max());
-    SelectConditionStep<Record> dsl = context.selectDistinct(distinctFields)
-        .from(table)
-        .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs))
-            .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
 
+    boolean needsSpans = request.spanName != null || request.minDuration != null || request.maxDuration != null;
+    if (needsSpans) {
+      List<SelectField<?>> distinctFields = new ArrayList<>(schema.spanIdFields);
+      distinctFields.add(ZIPKIN_SPANS.START_TS.max());
+      dsl = context.selectDistinct(distinctFields)
+              .from(table)
+              .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs))
+              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
+    } else {
+      List<SelectField<?>> distinctFields = new ArrayList<>();
+      distinctFields.add(ZIPKIN_ANNOTATIONS.TRACE_ID);
+      distinctFields.add(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH);
+      distinctFields.add(ZIPKIN_ANNOTATIONS.A_TIMESTAMP);
+      dsl = context.select(distinctFields)
+              .from(zipkinAnnotationsWithIndex)
+              .where(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
+    }
     if (request.serviceName != null) {
       dsl.and(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(request.serviceName));
     }
@@ -125,9 +136,18 @@ final class MySQLSpanStore implements SpanStore {
     } else if (request.minDuration != null) {
       dsl.and(ZIPKIN_SPANS.DURATION.greaterOrEqual(request.minDuration));
     }
-    return dsl
-        .groupBy(schema.spanIdFields)
-        .orderBy(ZIPKIN_SPANS.START_TS.max().desc()).limit(request.limit);
+    if (needsSpans) {
+      return dsl
+              .groupBy(schema.spanIdFields)
+              .orderBy(ZIPKIN_SPANS.START_TS.max().desc()).limit(request.limit);
+    } else {
+        List<Field<?>> groupBys = new ArrayList<>();
+        groupBys.add(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH);
+        groupBys.add(ZIPKIN_ANNOTATIONS.TRACE_ID);
+
+      return dsl.groupBy(groupBys).orderBy(ZIPKIN_ANNOTATIONS.A_VALUE.desc())
+              .limit(request.limit);
+    }
   }
 
   static TableOnConditionStep<?> maybeOnService(TableOnConditionStep<Record> table,
