@@ -87,11 +87,13 @@ public class ZipkinMySQLStorageProperties implements Serializable { // for Spark
   }
 
   public DataSource toDataSource() {
-    StringBuilder url = new StringBuilder("jdbc:mysql://");
+    StringBuilder url = new StringBuilder("jdbc:mysql:aurora://");
     url.append(getHost()).append(":").append(getPort());
     url.append("/").append(getDb());
     url.append("?autoReconnect=true");
     url.append("&useSSL=").append(isUseSsl());
+    url.append("&rewriteBatchedStatements=true");
+    url.append("&useServerPrepStmts=false");
     url.append("&useUnicode=yes&characterEncoding=UTF-8");
     HikariDataSource result = new HikariDataSource();
     result.setDriverClassName("org.mariadb.jdbc.Driver");
