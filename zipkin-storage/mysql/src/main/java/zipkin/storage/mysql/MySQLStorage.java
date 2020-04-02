@@ -15,7 +15,10 @@ package zipkin.storage.mysql;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import javax.annotation.Nullable;
 import javax.sql.DataSource;
 import org.jooq.ExecuteListenerProvider;
@@ -37,6 +40,7 @@ public final class MySQLStorage implements StorageComponent {
     return new Builder();
   }
 
+  private static Executor exec = Executors.newFixedThreadPool(2);
   public final static class Builder implements StorageComponent.Builder {
     boolean strictTraceId = true;
     private DataSource datasource;
@@ -88,6 +92,10 @@ public final class MySQLStorage implements StorageComponent {
   final Lazy<Schema> schema;
   final boolean strictTraceId;
 
+  private final Timer spansTimer;
+  private final Timer annotationsTimer;
+  private final Timer annotationsTimerToo;
+
   MySQLStorage(MySQLStorage.Builder builder) {
     this.datasource = checkNotNull(builder.datasource, "datasource");
     this.executor = checkNotNull(builder.executor, "executor");
@@ -98,6 +106,34 @@ public final class MySQLStorage implements StorageComponent {
       }
     };
     this.strictTraceId = builder.strictTraceId;
+
+    this.spansTimer = new Timer();
+    this.annotationsTimer = new Timer();
+    this.annotationsTimerToo = new Timer();
+    MySQLSpanConsumer spanConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask spansPersist = new TimerTask() {
+      @Override
+      public void run() {
+        spanConsumer.maybePersistSpans();
+      }
+    };
+    this.spansTimer.scheduleAtFixedRate(spansPersist, 0, 10 * 1000);
+    MySQLSpanConsumer annotationConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask annotationsPersist = new TimerTask() {
+      @Override
+      public void run() {
+        annotationConsumer.maybePersistAnnotations();
+      }
+    };
+    this.annotationsTimer.scheduleAtFixedRate(annotationsPersist, 0, 10 * 1000);
+    MySQLSpanConsumer annotationConsumerToo = new MySQLSpanConsumer(datasource, context, schema.get());
+    TimerTask annotationsPersistToo = new TimerTask() {
+      @Override
+      public void run() {
+        annotationConsumerToo.maybePersistAnnotations();
+      }
+    };
+    this.annotationsTimerToo.scheduleAtFixedRate(annotationsPersistToo, 0, 10 * 1000);
   }
 
   /** Returns the session in use by this storage component. */
@@ -115,7 +151,7 @@ public final class MySQLStorage implements StorageComponent {
 
   @Override public AsyncSpanConsumer asyncSpanConsumer() {
     MySQLSpanConsumer spanConsumer = new MySQLSpanConsumer(datasource, context, schema.get());
-    return blockingToAsync(spanConsumer, executor);
+    return blockingToAsync(spanConsumer, exec);
   }
 
   @Override public CheckResult check() {
