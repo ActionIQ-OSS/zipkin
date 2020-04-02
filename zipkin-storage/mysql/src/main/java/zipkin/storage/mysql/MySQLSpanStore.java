@@ -15,26 +15,12 @@ package zipkin.storage.mysql;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.sql.DataSource;
-import org.jooq.Condition;
-import org.jooq.Cursor;
-import org.jooq.DSLContext;
-import org.jooq.Record;
-import org.jooq.Row3;
-import org.jooq.SelectConditionStep;
-import org.jooq.SelectField;
-import org.jooq.SelectOffsetStep;
-import org.jooq.TableField;
-import org.jooq.TableOnConditionStep;
+import org.jooq.*;
+import org.jooq.impl.DSL;
 import zipkin.Annotation;
 import zipkin.BinaryAnnotation;
 import zipkin.BinaryAnnotation.Type;
@@ -91,8 +77,13 @@ final class MySQLSpanStore implements SpanStore {
     long endTs = (request.endTs > 0 && request.endTs != Long.MAX_VALUE) ? request.endTs * 1000
         : System.currentTimeMillis() * 1000;
 
-    TableOnConditionStep<?> table = ZIPKIN_SPANS.join(ZIPKIN_ANNOTATIONS)
-        .on(schema.joinCondition(ZIPKIN_ANNOTATIONS));
+    Table<Record> zipkinAnnotationsWithIndex = DSL.table("{0} use index (trace_date)", ZIPKIN_ANNOTATIONS);
+    TableOnConditionStep<?> table = ZIPKIN_SPANS.join(zipkinAnnotationsWithIndex)
+            .on(schema.joinCondition(ZIPKIN_ANNOTATIONS));
+    if (request.spanName != null || request.minDuration != null || request.maxDuration != null) {
+      table = ZIPKIN_SPANS.join(zipkinAnnotationsWithIndex)
+              .on(schema.joinCondition(ZIPKIN_ANNOTATIONS));
+    }
 
     int i = 0;
     for (String key : request.annotations) {
@@ -111,11 +102,25 @@ final class MySQLSpanStore implements SpanStore {
           .and(aTable.A_VALUE.eq(kv.getValue().getBytes(UTF_8))), aTable, request.serviceName);
     }
 
-    List<SelectField<?>> distinctFields = new ArrayList<>(schema.spanIdFields);
-    distinctFields.add(ZIPKIN_SPANS.START_TS.max());
-    SelectConditionStep<Record> dsl = context.selectDistinct(distinctFields)
-        .from(table)
-        .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs));
+    SelectConditionStep<Record> dsl;
+    boolean needsSpans = request.spanName != null || request.minDuration != null || request.maxDuration != null;
+    if (needsSpans) {
+      List<SelectField<?>> distinctFields = new ArrayList<>(schema.spanIdFields);
+      distinctFields.add(ZIPKIN_SPANS.START_TS.max());
+      dsl = context.selectDistinct(distinctFields)
+              .from(table)
+              .where(ZIPKIN_SPANS.START_TS.between(endTs - request.lookback * 1000, endTs))
+              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
+    } else {
+      List<SelectField<?>> distinctFields = new ArrayList<>();
+      distinctFields.add(ZIPKIN_ANNOTATIONS.TRACE_ID);
+      distinctFields.add(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH);
+      distinctFields.add(ZIPKIN_ANNOTATIONS.A_TIMESTAMP);
+      dsl = context.select(distinctFields)
+              .from(zipkinAnnotationsWithIndex)
+              .where(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - request.lookback * 1000, endTs));
+    }
+
 
     if (request.serviceName != null) {
       dsl.and(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(request.serviceName));
@@ -130,9 +135,17 @@ final class MySQLSpanStore implements SpanStore {
     } else if (request.minDuration != null) {
       dsl.and(ZIPKIN_SPANS.DURATION.greaterOrEqual(request.minDuration));
     }
-    return dsl
-        .groupBy(schema.spanIdFields)
-        .orderBy(ZIPKIN_SPANS.START_TS.max().desc()).limit(request.limit);
+    if (needsSpans) {
+      return dsl
+              .groupBy(schema.spanIdFields)
+              .orderBy(ZIPKIN_SPANS.START_TS.max().desc()).limit(request.limit);
+    } else {
+      List<Field<?>> groupBys = new ArrayList<>();
+      groupBys.add(ZIPKIN_ANNOTATIONS.TRACE_ID_HIGH);
+      groupBys.add(ZIPKIN_ANNOTATIONS.TRACE_ID);
+      return dsl.groupBy(groupBys).orderBy(ZIPKIN_ANNOTATIONS.A_VALUE.desc())
+              .limit(request.limit);
+    }
   }
 
   static TableOnConditionStep<?> maybeOnService(TableOnConditionStep<Record> table,
@@ -248,6 +261,11 @@ final class MySQLSpanStore implements SpanStore {
     return result.isEmpty() ? null : result.get(0);
   }
 
+  private Long oneHourAgoMicroSeconds() {
+    Long oneHourAgoMillis = System.currentTimeMillis() - 60 * 1000;
+    return oneHourAgoMillis * 1000;
+  }
+
   @Override
   public List<String> getServiceNames() {
     try (Connection conn = datasource.getConnection()) {
@@ -256,6 +274,7 @@ final class MySQLSpanStore implements SpanStore {
           .from(ZIPKIN_ANNOTATIONS)
           .where(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.isNotNull()
               .and(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.ne("")))
+              .and(ZIPKIN_ANNOTATIONS.A_TIMESTAMP.gt(oneHourAgoMicroSeconds()))
           .fetch(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME);
     } catch (SQLException e) {
       throw new RuntimeException("Error querying for " + e + ": " + e.getMessage());
@@ -266,19 +285,8 @@ final class MySQLSpanStore implements SpanStore {
   public List<String> getSpanNames(String serviceName) {
     if (serviceName == null) return emptyList();
     serviceName = serviceName.toLowerCase(); // service names are always lowercase!
-    try (Connection conn = datasource.getConnection()) {
-      return context.get(conn)
-          .selectDistinct(ZIPKIN_SPANS.NAME)
-          .from(ZIPKIN_SPANS)
-          .join(ZIPKIN_ANNOTATIONS)
-          .on(ZIPKIN_SPANS.TRACE_ID.eq(ZIPKIN_ANNOTATIONS.TRACE_ID))
-          .and(ZIPKIN_SPANS.ID.eq(ZIPKIN_ANNOTATIONS.SPAN_ID))
-          .where(ZIPKIN_ANNOTATIONS.ENDPOINT_SERVICE_NAME.eq(serviceName))
-          .orderBy(ZIPKIN_SPANS.NAME)
-          .fetch(ZIPKIN_SPANS.NAME);
-    } catch (SQLException e) {
-      throw new RuntimeException("Error querying for " + serviceName + ": " + e.getMessage());
-    }
+    Set<String> spansFromMemory = SpanName.Store.spans.getOrDefault(serviceName, Collections.emptySet());
+    return new LinkedList<>(spansFromMemory);
   }
 
   @Override
@@ -324,7 +332,12 @@ final class MySQLSpanStore implements SpanStore {
         .where(lookback == null ?
             ZIPKIN_SPANS.START_TS.lessOrEqual(endTs) :
             ZIPKIN_SPANS.START_TS.between(endTs - lookback * 1000, endTs))
-        // Grouping so that later code knows when a span or trace is finished.
+            .and(lookback == null ?
+                    ZIPKIN_ANNOTATIONS.A_TIMESTAMP.lessOrEqual(endTs) :
+                    ZIPKIN_ANNOTATIONS.A_TIMESTAMP.between(endTs - lookback * 1000, endTs)
+            )
+
+            // Grouping so that later code knows when a span or trace is finished.
         .groupBy(schema.dependencyLinkerGroupByFields).fetchLazy();
 
     Iterator<Iterator<Span>> traces =
